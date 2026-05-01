@@ -19,32 +19,41 @@
 # original bug. That is a non-default opt-in and not covered here; users who
 # hit it should restore the default or export CLAUDE_PLUGIN_ROOT explicitly.
 
+# Capture this sourced helper's path at top level. In zsh, $0 is the sourced
+# file here, but becomes the function name inside _source_config_loader.
+_source_helpers_path="${BASH_SOURCE[0]:-$0}"
+_source_helpers_dir="$(cd "$(dirname "$_source_helpers_path")" && pwd)"
+unset _source_helpers_path
+
 # Bootstrap CLAUDE_PLUGIN_ROOT if not set
 # Resolves from this file's location: scripts/lib/ -> ../../ = plugin root
 if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-  _sh_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-  CLAUDE_PLUGIN_ROOT="$(cd "$_sh_dir/../.." && pwd)"
-  unset _sh_dir
+  CLAUDE_PLUGIN_ROOT="$(cd "$_source_helpers_dir/../.." && pwd)"
 fi
 
 # Source shared config loader
 # Tries CLAUDE_PLUGIN_ROOT first, then falls back to locating via the caller's
-# script path (BASH_SOURCE entries under bash, $0 under zsh).
+# script path (BASH_SOURCE entries under bash, captured helper path under zsh).
 _source_config_loader() {
   local config_loader="${CLAUDE_PLUGIN_ROOT}/scripts/lib/config-loader.sh"
 
   # Fallback: resolve relative to caller script path(s).
   # Under bash: iterate every frame in BASH_SOURCE so we can walk up from the
   # sourced file (e.g. spec-resolver.sh in scripts/) to locate config-loader.sh.
-  # Under zsh: BASH_SOURCE is unset, so the array expansion is empty; $0 is
-  # appended so the same resolution works there too.
+  # Under zsh: BASH_SOURCE is unset, so use the helper directory captured while
+  # source-helpers.sh was being sourced. $0 is not used here because zsh's
+  # default FUNCTION_ARGZERO makes it the function name inside this function.
   # Checks both lib/config-loader.sh (for callers in scripts/) and
   # config-loader.sh (for this file in scripts/lib/)
   if [[ ! -f "$config_loader" ]]; then
     local script_dir candidate resolved_plugin_root
-    for candidate in "${BASH_SOURCE[@]}" "$0"; do
+    for candidate in "${BASH_SOURCE[@]:-}" "$_source_helpers_dir"; do
       [[ -n "$candidate" ]] || continue
-      script_dir="$(cd "$(dirname "$candidate")" && pwd 2>/dev/null)" || continue
+      if [[ -d "$candidate" ]]; then
+        script_dir="$candidate"
+      else
+        script_dir="$(cd "$(dirname "$candidate")" && pwd 2>/dev/null)" || continue
+      fi
       if [[ -f "$script_dir/lib/config-loader.sh" ]]; then
         config_loader="$script_dir/lib/config-loader.sh"
         resolved_plugin_root="$(cd "$script_dir/.." && pwd)"

@@ -63,6 +63,16 @@ _run_case() {
   fi
 }
 
+_assert_no_shell_cwd_errors() {
+  local output="$1"
+  if printf '%s\n' "$output" | grep -Eqi 'getcwd|shell-init|cannot access parent directories|error retrieving current directory'; then
+    echo "unexpected shell/CWD error output:" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
 # ---- Test 1: static - all affected files use the zsh-compatible pattern ----
 _test "affected scripts use \${BASH_SOURCE[0]:-\$0} self-location pattern"
 _case_1() {
@@ -121,12 +131,12 @@ _run_case "bare \${BASH_SOURCE[0]} remains somewhere" _case_2
 
 # ---- Test 3: functional (bash) - source spec-resolver.sh from unrelated CWD ----
 _test "bash: source spec-resolver.sh from unrelated CWD resolves source-helpers.sh"
-_case_3() {
-  local TMPDIR_TEST plugin
+_case_3() (
+  local TMPDIR_TEST plugin stderr_file stderr_output
   TMPDIR_TEST=$(mktemp -d)
-  # shellcheck disable=SC2064 # expand TMPDIR_TEST now
-  trap "rm -rf '$TMPDIR_TEST'" RETURN
-  cd "$TMPDIR_TEST"
+  trap 'cd "$REPO_ROOT" >/dev/null 2>&1 || true; rm -rf "$TMPDIR_TEST"' EXIT
+  cd "$TMPDIR_TEST" || return 1
+  stderr_file="$TMPDIR_TEST/stderr.log"
 
   for plugin in "${PLUGINS[@]}"; do
     unset -f load_agentic_config 2>/dev/null || true
@@ -135,65 +145,90 @@ _case_3() {
     # Source without setting CLAUDE_PLUGIN_ROOT: source-helpers.sh must
     # bootstrap it from BASH_SOURCE/$0. CWD is an unrelated tmpdir.
     # shellcheck source=/dev/null
-    if ! source "$plugin/scripts/spec-resolver.sh" 2>/dev/null; then
+    : > "$stderr_file"
+    if ! source "$plugin/scripts/spec-resolver.sh" 2>"$stderr_file"; then
       echo "failed to source $plugin/scripts/spec-resolver.sh from $TMPDIR_TEST" >&2
+      cat "$stderr_file" >&2
       return 1
     fi
+    stderr_output="$(cat "$stderr_file")"
+    _assert_no_shell_cwd_errors "$stderr_output" || return 1
+    pwd >/dev/null || return 1
     if [[ "$(cd "$CLAUDE_PLUGIN_ROOT" && pwd)" != "$(cd "$plugin" && pwd)" ]]; then
       echo "CLAUDE_PLUGIN_ROOT mismatch: got '$CLAUDE_PLUGIN_ROOT', expected '$plugin'" >&2
       return 1
     fi
   done
   return 0
-}
+)
 _run_case "bash self-location broke when CWD differs from script dir" _case_3
 
 # ---- Test 4: functional (bash) - source external-specs.sh from unrelated CWD ----
 _test "bash: source external-specs.sh from unrelated CWD resolves source-helpers.sh"
-_case_4() {
-  local TMPDIR_TEST plugin
+_case_4() (
+  local TMPDIR_TEST plugin stderr_file stderr_output
   TMPDIR_TEST=$(mktemp -d)
-  # shellcheck disable=SC2064
-  trap "rm -rf '$TMPDIR_TEST'" RETURN
-  cd "$TMPDIR_TEST"
+  trap 'cd "$REPO_ROOT" >/dev/null 2>&1 || true; rm -rf "$TMPDIR_TEST"' EXIT
+  cd "$TMPDIR_TEST" || return 1
+  stderr_file="$TMPDIR_TEST/stderr.log"
 
   for plugin in "${PLUGINS[@]}"; do
     unset -f load_agentic_config 2>/dev/null || true
     unset -f get_project_root 2>/dev/null || true
     unset CLAUDE_PLUGIN_ROOT 2>/dev/null || true
     # shellcheck source=/dev/null
-    if ! source "$plugin/scripts/external-specs.sh" 2>/dev/null; then
+    : > "$stderr_file"
+    if ! source "$plugin/scripts/external-specs.sh" 2>"$stderr_file"; then
       echo "failed to source $plugin/scripts/external-specs.sh from $TMPDIR_TEST" >&2
+      cat "$stderr_file" >&2
       return 1
     fi
+    stderr_output="$(cat "$stderr_file")"
+    _assert_no_shell_cwd_errors "$stderr_output" || return 1
+    pwd >/dev/null || return 1
   done
   return 0
-}
+)
 _run_case "bash self-location broke when CWD differs from script dir" _case_4
 
 # ---- Test 5: zsh (if available) - exact reproduction of issue #67 ----
-_test "zsh: source spec-resolver.sh without errors (skipped if zsh unavailable)"
-_case_5() {
-  local TMPDIR_TEST plugin zsh_out
+_test "zsh: stale CLAUDE_PLUGIN_ROOT recovers through captured helper path (skipped if zsh unavailable)"
+_case_5() (
+  local TMPDIR_TEST plugin zsh_out expected_root
   TMPDIR_TEST=$(mktemp -d)
-  # shellcheck disable=SC2064
-  trap "rm -rf '$TMPDIR_TEST'" RETURN
+  trap 'cd "$REPO_ROOT" >/dev/null 2>&1 || true; rm -rf "$TMPDIR_TEST"' EXIT
 
   for plugin in "${PLUGINS[@]}"; do
-    # Run a fresh zsh from an unrelated CWD, with CLAUDE_PLUGIN_ROOT cleared,
-    # so self-location is exercised end-to-end. The reported failure was
-    # "no such file or directory: <cwd>/lib/source-helpers.sh".
+    expected_root="$(cd "$plugin" && pwd)"
+    # Run a fresh zsh from an unrelated CWD, with CLAUDE_PLUGIN_ROOT set to a
+    # bad path, so _source_config_loader must recover from the helper path
+    # captured before zsh changes $0 to the function name.
     if ! zsh_out=$(cd "$TMPDIR_TEST" && \
-      env -u CLAUDE_PLUGIN_ROOT zsh -f -c \
+      env CLAUDE_PLUGIN_ROOT=/definitely/missing zsh -f -c \
         "source '$plugin/scripts/spec-resolver.sh' && \
          source '$plugin/scripts/external-specs.sh' && \
+         _source_config_loader; \
+         rc=\$?; \
+         echo RC=\$rc; \
          echo RESOLVED=\$CLAUDE_PLUGIN_ROOT" 2>&1); then
       echo "zsh sourcing failed for $plugin:" >&2
       echo "$zsh_out" >&2
       return 1
     fi
+    _assert_no_shell_cwd_errors "$zsh_out" || return 1
+    if ! printf '%s\n' "$zsh_out" | grep -q "^RC=0$"; then
+      echo "zsh _source_config_loader did not return 0 for $plugin:" >&2
+      echo "$zsh_out" >&2
+      return 1
+    fi
     if ! printf '%s\n' "$zsh_out" | grep -q "^RESOLVED="; then
       echo "zsh did not print RESOLVED marker for $plugin:" >&2
+      echo "$zsh_out" >&2
+      return 1
+    fi
+    if ! printf '%s\n' "$zsh_out" | grep -q "^RESOLVED=$expected_root$"; then
+      echo "zsh did not repair CLAUDE_PLUGIN_ROOT for $plugin:" >&2
+      echo "expected: RESOLVED=$expected_root" >&2
       echo "$zsh_out" >&2
       return 1
     fi
@@ -204,7 +239,7 @@ _case_5() {
     fi
   done
   return 0
-}
+)
 _zsh_sane() {
   # Probe that zsh (a) exists and (b) can actually execute a sourced file at
   # the paths this repo lives on. Skips broken Windows ports that do not
@@ -256,14 +291,18 @@ _case_6() {
   # a file, so this gives us indirect evidence that the $0 leg of the fallback
   # resolves usefully on a non-bash shell. Skip if dash is unavailable.
   if command -v dash >/dev/null 2>&1; then
-    local dash_script resolved
+    local dash_script resolved dash_rc
     dash_script=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -f '$dash_script'" RETURN
     cat > "$dash_script" <<'EOS'
 printf '%s\n' "$0"
 EOS
     resolved=$(dash "$dash_script")
+    dash_rc=$?
+    rm -f "$dash_script"
+    if [[ $dash_rc -ne 0 ]]; then
+      echo "dash: script failed with rc=$dash_rc" >&2
+      return 1
+    fi
     if [[ "$resolved" != "$dash_script" ]]; then
       echo "dash: \$0 did not resolve to script path, got '$resolved'" >&2
       return 1
