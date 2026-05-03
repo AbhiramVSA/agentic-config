@@ -23,6 +23,79 @@ def test_parent_runtime_auto_finalizes_terminal_child_reports() -> None:
     assert "events = await finalizeManagedAgentAfterTerminalReport(launch, ctx);" in text
 
 
+def test_parent_runtime_batches_and_retries_terminal_delivery() -> None:
+    """Terminal closeout notification should go through a durable batched parent queue."""
+    index_text = PIMUX_INDEX.read_text()
+    bridge_text = PIMUX_BRIDGE.read_text()
+    parent_delivery_text = (PIMUX_PACKAGE_DIR / "parent-delivery.ts").read_text()
+    assert "interface QueuedParentDelivery" in parent_delivery_text
+    assert "const parentDeliveryQueue = new Map<string, QueuedParentDelivery>();" in index_text
+    assert "const buildParentDeliveryBatchContent" in index_text
+    assert "# pimux reports: ${deliveries.length} updates" in index_text
+    assert "terminalNotificationDeliveredAt" in bridge_text
+    assert "terminalNotificationAttemptCount" in bridge_text
+    assert "!notificationDelivered" in index_text
+    assert "key: `settlement:${bridgeDir}:${settlement.terminalEvent?.eventId ?? settlement.settledState}`" in index_text
+    assert "const processingParentBridges = new Map<string, ParentBridgeProcessingState>();" in index_text
+    assert "existing.rerunRequested = true;" in index_text
+
+
+def test_parent_delivery_ack_happens_after_successful_send() -> None:
+    """Deliverable bridge events should not be durably acknowledged before sendMessage succeeds."""
+    index_text = PIMUX_INDEX.read_text()
+    bridge_text = PIMUX_BRIDGE.read_text()
+    parent_delivery_text = (PIMUX_PACKAGE_DIR / "parent-delivery.ts").read_text()
+    deliverable_block = index_text.split("if (shouldDeliverBridgeEventToParent(event)) {", 1)[1].split(
+        "} else if (!terminalReport) {",
+        1,
+    )[0]
+    assert "enqueueParentDelivery(" in deliverable_block
+    assert "delivered.add(event.eventId)" not in deliverable_block
+    assert "await flushQueuedParentDeliveries({" in index_text
+    assert "markParentDeliveriesDelivered," in index_text
+    assert "sendParentMessage:" in index_text
+    assert "await options.markParentDeliveriesDelivered(deliveries);" in parent_delivery_text
+    assert "await options.updateTerminalNotificationState(deliveries, batchId, \"delivered\");" in parent_delivery_text
+    assert "eventIds.push(...delivery.eventIds);" in index_text
+    assert "parentState.deliveredEventIds = [...delivered].slice(-500);" in index_text
+    assert "deliveredEventIds: uniqueStrings([...(current.deliveredEventIds ?? []), ...(next.deliveredEventIds ?? [])]).slice(-500)," in bridge_text
+
+
+def test_activity_and_ping_agent_surface_is_available() -> None:
+    """pimux should expose deterministic activity checks and active status probes."""
+    index_text = PIMUX_INDEX.read_text()
+    schema_text = (PIMUX_PACKAGE_DIR / "schema.ts").read_text()
+    settlement_text = (PIMUX_PACKAGE_DIR / "settlement.ts").read_text()
+    registry_text = PIMUX_REGISTRY.read_text()
+    render_text = PIMUX_RENDER.read_text()
+    assert '"activity"' in schema_text
+    assert '"ping_agent"' in schema_text
+    assert 'case "activity": {' in index_text
+    assert "async function resolveManagedAgentStatus(" in index_text
+    assert "const status = await resolveManagedAgentStatus(ctx, target);" in index_text
+    assert 'case "ping_agent": {' in index_text
+    assert 'case "ping": {' in index_text
+    assert 'type: "status_request"' in index_text
+    assert '| "status_request"' in settlement_text
+    assert "buildAgentActivitySnapshot" in registry_text
+    assert "formatAgentActivitySnapshot" in registry_text
+    assert "pimux status_request response contract" in render_text
+    assert 'throw new Error("ping requires target")' not in index_text
+
+
+def test_runtime_has_inactivity_watchdog_monitor() -> None:
+    """The extension should perform background reconciliation and inactivity watchdog notification."""
+    text = PIMUX_INDEX.read_text()
+    assert "BACKGROUND_MONITOR_INTERVAL_MS" in text
+    assert "processInactivityWatchdog" in text
+    assert "pimux inactivity watchdog" in text
+    assert "ensureBackgroundMonitor(ctx);" in text
+    assert "function runBackgroundTask(task: Promise<void>): void" in text
+    assert "runBackgroundTask(processBridgeDeliveries(bridgeDir, getSessionKey(ctx), ctx));" in text
+    assert "runBackgroundTask(reconcileParentBridgeWatchers(ctx));" in text
+    assert "runBackgroundTask(processInactivityWatchdog(ctx));" in text
+
+
 def test_ui_selectors_render_string_labels_instead_of_objects() -> None:
     """The open/tree pickers should pass display strings to ctx.ui.select."""
     text = PIMUX_INDEX.read_text()
@@ -121,14 +194,14 @@ def test_parent_control_plane_lock_is_extension_enforced() -> None:
     assert 'CONTROL_PLANE_INACTIVITY_WATCHDOG_MS' in helper_text
     assert 'Do not poll pimux; wait for delivered child activity.' in helper_text
     assert 'Do not use Bash sleep/wait loops for supervision' in helper_text
-    assert 'status/capture/tree/list/open are recovery-only' in helper_text
+    assert 'status/activity/capture/tree/list/open are recovery-only' in helper_text
     assert 'Wait for a delivered child report before sending messages' in helper_text
     assert 'A recovery send_message already went out for the current activity window.' in helper_text
-    assert 'Terminal settlement is ready. Use one final pimux status check, then stop supervising this child.' in helper_text
+    assert 'Terminal settlement is ready. Use one final pimux status or activity check, then stop supervising this child.' in helper_text
     assert 'PIMUX HAPPY-PATH DISCIPLINE: this run is notify-first, not poll-first.' in helper_text
     assert 'FIRST: do not poll pimux and do not use Bash sleep/wait loops; wait for delivered child activity.' in helper_text
     assert 'Allowed happy-path sequence: spawn -> wait for child report -> send_message once if needed -> wait for closeout -> final status verification.' in helper_text
-    assert 'after terminal settlement, use one final pimux status check before advancing.' in helper_text
+    assert 'after terminal settlement, use one final pimux status or activity check before advancing.' in helper_text
     assert 'Progress is non-terminal; question is terminal waiting-on-parent settlement.' in text
     assert 'For same-session child questions that must continue, use report_parent(progress, requiresResponse=true), not question.' in text
     assert 'For same-session parent input that you need before continuing, emit progress with requiresResponse=true.' in bridge_text
