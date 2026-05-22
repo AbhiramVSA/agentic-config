@@ -21,8 +21,10 @@ import {
 	summarizePrompt,
 	truncate,
 	type NotificationMode,
+	type ThinkingEffort,
 } from "./paths.ts";
-import type { BridgeEventDirection, BridgeEventType, SettledTerminalState } from "./settlement.ts";
+import { isSettledTerminalState } from "./settlement.ts";
+import type { BridgeEventDirection, BridgeEventType, BridgeSettlementState } from "./settlement.ts";
 
 export type ReportParentKind = "question" | "blocker" | "progress" | "failure" | "closeout";
 
@@ -35,6 +37,7 @@ export interface BridgeLaunchFile {
 	sessionName: string;
 	cwd: string;
 	model: string;
+	thinking?: ThinkingEffort;
 	promptPreview: string;
 	role?: string;
 	goal?: string;
@@ -75,7 +78,12 @@ export interface BridgeParentState {
 	terminalEventId?: string;
 	terminalFinalizedAt?: string;
 	terminalObservedAt?: string;
-	terminalState?: SettledTerminalState;
+	terminalState?: BridgeSettlementState;
+	terminalReportEventId?: string;
+	terminalReportKind?: Exclude<ReportParentKind, "progress">;
+	terminalReportObservedAt?: string;
+	terminalReportExitTimedOutAt?: string;
+	terminalReportExitTimeoutNotifiedAt?: string;
 	terminalNotificationQueuedAt?: string;
 	terminalNotificationDeliveredAt?: string;
 	terminalNotificationBatchId?: string;
@@ -148,6 +156,13 @@ function preferLatestIso(left: string | undefined, right: string | undefined): s
 	return left >= right ? left : right;
 }
 
+function preferTerminalState(current: BridgeSettlementState | undefined, next: BridgeSettlementState | undefined): BridgeSettlementState | undefined {
+	if (!next) return current;
+	if (!current) return next;
+	if (isSettledTerminalState(current) && !isSettledTerminalState(next)) return current;
+	return next;
+}
+
 function mergeBridgeParentState(current: BridgeParentState, next: BridgeParentState): BridgeParentState {
 	return {
 		...current,
@@ -156,7 +171,12 @@ function mergeBridgeParentState(current: BridgeParentState, next: BridgeParentSt
 		terminalEventId: next.terminalEventId ?? current.terminalEventId,
 		terminalFinalizedAt: preferLatestIso(current.terminalFinalizedAt, next.terminalFinalizedAt),
 		terminalObservedAt: preferLatestIso(current.terminalObservedAt, next.terminalObservedAt),
-		terminalState: next.terminalState ?? current.terminalState,
+		terminalState: preferTerminalState(current.terminalState, next.terminalState),
+		terminalReportEventId: next.terminalReportEventId ?? current.terminalReportEventId,
+		terminalReportKind: next.terminalReportKind ?? current.terminalReportKind,
+		terminalReportObservedAt: preferLatestIso(current.terminalReportObservedAt, next.terminalReportObservedAt),
+		terminalReportExitTimedOutAt: preferLatestIso(current.terminalReportExitTimedOutAt, next.terminalReportExitTimedOutAt),
+		terminalReportExitTimeoutNotifiedAt: preferLatestIso(current.terminalReportExitTimeoutNotifiedAt, next.terminalReportExitTimeoutNotifiedAt),
 		terminalNotificationQueuedAt: preferLatestIso(current.terminalNotificationQueuedAt, next.terminalNotificationQueuedAt),
 		terminalNotificationDeliveredAt: preferLatestIso(current.terminalNotificationDeliveredAt, next.terminalNotificationDeliveredAt),
 		terminalNotificationBatchId: next.terminalNotificationBatchId ?? current.terminalNotificationBatchId,
@@ -280,6 +300,26 @@ export async function appendBridgeEvent(
 	return fullEvent;
 }
 
+export async function appendBridgeEventIfMissing(
+	bridgeDir: string,
+	event: Omit<BridgeEvent, "eventId" | "timestamp">,
+	predicate: (event: BridgeEvent) => boolean,
+): Promise<{ events: BridgeEvent[]; event: BridgeEvent; appended: boolean }> {
+	const eventsPath = getBridgeEventsPath(bridgeDir);
+	return await withQueuedFileOperation(eventsPath, async () => {
+		const events = await readBridgeEvents(bridgeDir);
+		const existing = events.find(predicate);
+		if (existing) return { events, event: existing, appended: false };
+		const fullEvent: BridgeEvent = {
+			eventId: randomUUID(),
+			timestamp: nowIso(),
+			...event,
+		};
+		await appendJsonLine(eventsPath, fullEvent);
+		return { events: [...events, fullEvent], event: fullEvent, appended: true };
+	});
+}
+
 export async function writeSignalFile(
 	filePath: string,
 	fields: Record<string, unknown>,
@@ -396,18 +436,20 @@ export function buildChildProtocol(launch: BridgeLaunchFile): string {
 		"- Child -> parent reporting uses pimux report_parent only from this authoritative direct child session.",
 		"- If you launch local helpers or subagents, they are local-only and must not call pimux or report_parent.",
 		"- If you act as an orchestrator, you own the control-plane for your subtree.",
+		"- Quality, accuracy, and prompt/spec fidelity outrank speed.",
 		"- Do not send repeated impatient nudges.",
+		"- Do not close out because the parent asks for updates, says continue, or appears to be waiting.",
 		"- Do not retry a spawn if the requested child already exists.",
 		"- Do not treat helper output, capture noise, or partial artifacts as completion.",
 		"- If you spawn pimux children, verify them via pimux status before you consolidate upward.",
 		"",
 		"Terminal rules:",
-		"- Emit progress only for bounded non-terminal updates.",
+		"- Emit progress only for bounded non-terminal updates, then continue working when more work is needed.",
 		"- For same-session parent input that you need before continuing, emit progress with requiresResponse=true.",
 		"- Emit question only for terminal waiting-on-parent settlement; do not use question when you intend to keep working in this session.",
 		"- Emit blocker when the run is terminally blocked and should settle blocked.",
 		"- Emit failure for explicit non-success terminal handoff.",
-		"- Emit closeout exactly once when the entire assigned mission is complete.",
+		"- Emit closeout exactly once only when the entire assigned mission is complete, success criteria are checked, validation/evidence are ready to summarize, and known uncertainty/blockers are disclosed.",
 		"- Success settles only after closeout plus managed-session exit.",
 		"- After any terminal report (closeout, failure, blocker, or question), do not keep working or continue the conversation; the pimux runtime will finalize the managed session.",
 		"- Exiting without a valid terminal declaration settles as protocol_violation.",
@@ -446,6 +488,7 @@ export async function writeLaunchPacket(
 		`- Root Agent ID: ${launch.rootAgentId}`,
 		launch.parentAgentId ? `- Parent Agent ID: ${launch.parentAgentId}` : undefined,
 		`- Notification Mode: ${launch.notificationMode}`,
+		launch.thinking ? `- Thinking Effort: ${launch.thinking}` : undefined,
 		launch.contextBrief ? `- Context Brief: ${launch.contextBrief}` : undefined,
 	].filter((line): line is string => Boolean(line)).join("\n");
 	await writeTextFileAtomic(packetPath, `${content}\n`);
@@ -469,6 +512,7 @@ export async function createBridgeLaunch(params: {
 	sessionName: string;
 	cwd: string;
 	model: string;
+	thinking?: ThinkingEffort;
 	prompt: string;
 	role?: string;
 	goal?: string;
@@ -490,6 +534,7 @@ export async function createBridgeLaunch(params: {
 		sessionName: params.sessionName,
 		cwd: params.cwd,
 		model: params.model,
+		thinking: params.thinking,
 		promptPreview: summarizePrompt(params.prompt),
 		role: params.role,
 		goal: params.goal,

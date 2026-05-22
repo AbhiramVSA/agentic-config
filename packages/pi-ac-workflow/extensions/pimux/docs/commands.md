@@ -54,6 +54,16 @@ Spawned pimux children always use `notify-and-follow-up`.
 /pimux spawn --open "Act as an orchestrator and keep the session watchable."
 ```
 
+## Thinking effort
+
+Use `--thinking` to pass Pi's thinking effort flag to spawned children. Valid levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+
+```text
+/pimux spawn --model openai-codex/gpt-5.3-codex --thinking high "Plan the migration and report the risks."
+```
+
+The `--model provider/model:thinking` shortcut remains supported by Pi, but `--thinking` is preferred when model identity and effort should stay separate.
+
 ## Messaging
 
 Parent -> child:
@@ -69,17 +79,17 @@ Valid `report_parent` kinds:
 - `failure`
 - `closeout`
 
-Parent-side interface delivery should also show parent -> child bridge messages as concise pimux events without triggering an extra turn.
+Parent-side interface delivery should also show parent -> child bridge messages as concise pimux events without triggering an extra turn. Use `send_message` for child-requested answers or user-directed instructions, not hurry-up nudges.
 
-After a terminal `report_parent`, the pimux runtime batches bursty terminal notifications and keeps terminal notification state retryable until the parent delivery queue records delivery.
+After a terminal `report_parent`, pimux first records `terminal_report_received`, finalizes the managed session, then reports a settled state only after exit evidence exists. If exit evidence does not arrive before timeout, status/activity surface `terminal_report_exit_timeout` with recovery guidance. Terminal settlement notifications remain retryable until the parent delivery queue records delivery.
 
 ## Inspection
 
 - `list` for current-session agents by default
 - `tree` for hierarchy shape
 - `status` for one agent plus settlement state and pane tail
-- `activity` for deterministic no-capture state (`running_recent_activity`, `running_quiet`, `settled`, `missing_session`, `terminated`, or `protocol_violation`)
-- `ping_agent` / `ping` to send a correlated `status_request`; the child must respond with `progress` if still working or a terminal report if done, blocked, or failed
+- `activity` for deterministic no-capture state (`running_recent_activity`, `running_quiet`, `terminal_report_waiting_for_exit`, `terminal_report_exit_timeout`, `settled`, `missing_session`, `terminated`, or `protocol_violation`)
+- `ping_agent` / `ping` to send a correlated neutral `status_request`; the child must respond with `progress` if still working or a terminal report only when quality-gated done, blocked, or failed
 - `capture` for pane text
 - `open` to inspect live in iTerm
 - `navigate` to select a node from the current-session hierarchy and act on it
@@ -88,7 +98,7 @@ After a terminal `report_parent`, the pimux runtime batches bursty terminal noti
 - interactive `open`, `capture`, `send`, and `kill` pickers should prefer live agents when no target is provided
 - `prune --dry-run` to preview historical cleanup candidates
 
-Auto-prune removes `terminated` or `missing` pimux registry entries aged at least `1d`.
+Auto-prune removes `terminated` or `missing` pimux registry entries aged at least `1d`; pending terminal-report states are retained for recovery.
 
 ## Control-plane recovery
 

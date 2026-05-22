@@ -6,16 +6,28 @@ All notable changes to agentic-config.
 
 ### Added
 
+- `pi-ac-workflow`: add explicit `--thinking` effort support to `pimux spawn` and forward it to spawned Pi children.
+- `ac-workflow`: allow explicit MUX deactivation to stand down skill-scoped Bash guards for diagnostics until the next session starts.
+- Canonical generator: add Claude skill compatibility aliases under `skills/<plugin>/<skill>/SKILL.md` so plugin-qualified skill paths resolve for every generated `ac-*` skill.
+- `pi-ac-workflow`: add `pi-bash.py` and `cc-bash.py` mux worker wrappers for Pi and Claude Code CLI sessions.
 - Docs: add upstream Pi attribution, including `pi.dev`, `badlogic/pi-mono`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-ai` references, MIT license notes, and package ownership boundaries.
 - `pi-ac-workflow`: add deterministic `pimux activity` checks and correlated `ping_agent` liveness probes for managed agents.
 - `pi-ac-workflow`: add behavioral parent-delivery coverage for retry, ack ordering, terminal notification dedupe, watchdog throttling, and ping gating.
 
 ### Changed
 
+- `pi-ac-workflow`: harden `pi-bash.py` and `cc-bash.py` stream launches with lean event logs, explicit raw-event opt-in, pre-output wrapper diagnostics, first-event startup watchdogs, and process-group cleanup for inherited-pipe stalls.
+- Canonical generator: reconcile generated package drift by promoting current `pi-ac-safety` allow-persistence behavior into canonical assets and syncing generated `pi-compat` dependency versions.
 - `pi-ac-workflow`: harden `pimux` parent bridge delivery for bursty terminal closeouts with batched notifications, retryable terminal notification state, bridge-delivery reconciliation, and inactivity watchdog alerts.
   - persists parent-delivery acknowledgements only after successful sends and requeues pending deliveries when queued-state persistence or sends fail
   - allows `pimux activity` as final settlement verification alongside `status`
   - allows `pimux open` during supervision only when the user explicitly asks to watch live, while routine polling checks remain blocked
+- `pi-ac-workflow`: make `pimux` supervision quality-first by blocking parent nudges after ordinary progress, allowing replies only for `requiresResponse=true` or explicit user instructions, and making liveness probes neutral instead of closeout-oriented.
+
+### Fixed
+
+- `pi-ac-workflow`: make `pi-bash.py` stream workers fail closed on prolonged child-output silence, fail fast on silent startup, run child stdin from `DEVNULL`, default inner launches to `--offline`, and persist failed lifecycle state in the latest-attempt manifest.
+- `pi-ac-workflow`: make pimux terminal reports enter explicit post-report states, auto-finalize managed child sessions, and surface exit timeouts instead of leaving closeout agents ambiguously running.
 
 ## [0.3.0] - 2026-04-30
 

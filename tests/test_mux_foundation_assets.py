@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -46,6 +47,21 @@ def parse_output_value(stdout: str, key: str) -> str:
 def parse_session_dir(stdout: str) -> str:
     """Extract the relative session directory from session.py output."""
     return parse_output_value(stdout, "SESSION_DIR")
+
+
+def load_tool_module(script_path: Path, module_name: str) -> Any:
+    """Load a generated tool module with its sibling imports on sys.path."""
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module from: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    original_path = sys.path.copy()
+    sys.path.insert(0, str(script_path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path = original_path
+    return module
 
 
 def parse_json_stdout(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -264,6 +280,12 @@ def test_generated_mux_claude_frontmatter_survives_generation() -> None:
     assert "hooks:" in mux_text
     assert "matcher: Read|Write|Edit|NotebookEdit|Grep|Glob|WebSearch|WebFetch|TaskOutput|Skill|Bash|Task" in mux_text
     assert "${CLAUDE_PLUGIN_ROOT}/skills/mux/hooks/mux-orchestrator-guard.py" in mux_text
+    assert "${CLAUDE_PLUGIN_ROOT}/skills/mux/tools/pi-bash.py launch" in mux_text
+    assert "`cc-bash.py` retained but disabled" in mux_text
+    assert "`cc-bash.py launch`; the wrapper exits non-zero" in mux_text
+    assert "--stream" in mux_text
+    assert "<SESSION_DIR>/logs/<agent-id>.<attempt-id>.*" in mux_text
+    assert "<SESSION_DIR>/logs/<agent-id>.latest.json" in mux_text
 
     mux_ospec_text = CLAUDE_MUX_OSPEC_SKILL.read_text()
     assert "argument-hint:" in mux_ospec_text
@@ -295,6 +317,60 @@ def test_generated_pi_mux_foundation_assets_exist() -> None:
     assert (PROJECT_ROOT / "packages" / "pi-ac-workflow" / "assets" / "mux" / "README.md").exists()
     assert (MUX_TOOLS_ROOT / "session.py").exists()
     assert (MUX_TOOLS_ROOT / "ledger.py").exists()
+    assert (MUX_TOOLS_ROOT / "pi-bash.py").exists()
+    assert (MUX_TOOLS_ROOT / "pi-bash.default.yaml").exists()
+    assert (MUX_TOOLS_ROOT / "cc-bash.py").exists()
+    assert (PROJECT_ROOT / "plugins" / "ac-workflow" / "mux" / "tools" / "pi-bash.py").exists()
+    assert (PROJECT_ROOT / "plugins" / "ac-workflow" / "mux" / "tools" / "cc-bash.py").exists()
+    skills_mux_tools = PROJECT_ROOT / "plugins" / "ac-workflow" / "skills" / "mux" / "tools"
+    assert (skills_mux_tools / "pi-bash.py").exists()
+    assert (skills_mux_tools / "pi-bash.default.yaml").exists()
+    assert (skills_mux_tools / "cc-bash.py").exists()
+    assert (skills_mux_tools / "pi-bash.py").read_text() == (MUX_TOOLS_ROOT / "pi-bash.py").read_text()
+    assert (skills_mux_tools / "pi-bash.default.yaml").read_text() == (MUX_TOOLS_ROOT / "pi-bash.default.yaml").read_text()
+    pi_bash_text = (MUX_TOOLS_ROOT / "pi-bash.py").read_text()
+    cc_bash_text = (MUX_TOOLS_ROOT / "cc-bash.py").read_text()
+    assert "--stream" in pi_bash_text
+    assert '"--mode", "json"' in pi_bash_text
+    assert "--startup-warn-after" in pi_bash_text
+    assert "--startup-timeout" in pi_bash_text
+    assert "--allow-startup-network" in pi_bash_text
+    assert "DEFAULT_STARTUP_WARN_AFTER_SECONDS = 30.0" in pi_bash_text
+    assert "DEFAULT_STREAM_STARTUP_TIMEOUT_SECONDS = 60.0" in pi_bash_text
+    assert "DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 600.0" in pi_bash_text
+    assert 'command.append("--offline")' in pi_bash_text
+    assert "stdin=subprocess.DEVNULL" in pi_bash_text
+    assert "--mirror-prefix" in pi_bash_text
+    assert "--no-mirror" in pi_bash_text
+    assert "--raw-events" in pi_bash_text
+    assert "--provider" in pi_bash_text
+    assert "openai-codex" in (MUX_TOOLS_ROOT / "pi-bash.default.yaml").read_text()
+    assert "gpt-5.5" in (MUX_TOOLS_ROOT / "pi-bash.default.yaml").read_text()
+    assert "--heartbeat-interval" in pi_bash_text
+    assert "--no-extensions" in pi_bash_text
+    assert 'DEFAULT_TOOL_ALLOWLIST = "read,write,grep,find,ls"' in pi_bash_text
+    assert "read,bash,edit,write" not in pi_bash_text
+    assert "default pi-bash tool allowlist excludes Bash and Edit" in pi_bash_text
+    assert "create the success signal by writing this exact text" in pi_bash_text
+    assert "ensure_path_inside_base(report_abs, session_abs" in pi_bash_text
+    assert "must not contain parent directory traversal" in pi_bash_text
+    assert 'f"{prefix}.events.jsonl"' in pi_bash_text
+    assert 'f"{prefix}.raw-events.jsonl"' in pi_bash_text
+    assert 'f"{prefix}.wrapper.log"' in pi_bash_text
+    assert 'f"{safe_name}.latest.json"' in pi_bash_text
+    assert "CC_BASH_DISABLED_REASON" in cc_bash_text
+    assert "Anthropic disabled subscription access" in cc_bash_text
+    assert "raise CCBashError(CC_BASH_DISABLED_MESSAGE)" in cc_bash_text
+    assert "--stream" in cc_bash_text
+    assert '"stream-json" if args.stream else str(args.output_format)' in cc_bash_text
+    assert 'command.append("--verbose")' in cc_bash_text
+    assert "--startup-warn-after" in cc_bash_text
+    assert "--mirror-prefix" in cc_bash_text
+    assert "--no-mirror" in cc_bash_text
+    assert "--raw-events" in cc_bash_text
+    assert 'f"{safe_name}.events.jsonl"' in cc_bash_text
+    assert 'f"{safe_name}.raw-events.jsonl"' in cc_bash_text
+    assert 'f"{safe_name}.wrapper.log"' in cc_bash_text
     assert (MUX_TOOLS_ROOT / "signal.py").exists()
     assert (MUX_TOOLS_ROOT / "verify.py").exists()
     assert PI_MUX_SKILL.exists()
@@ -545,6 +621,23 @@ def test_session_initializes_mux_protocol_ledger(tmp_path: Path) -> None:
     assert first_transition["to"] == "LOCK"
 
 
+def test_session_clears_mux_deactivation_marker(tmp_path: Path) -> None:
+    """session.py should clear explicit deactivation before starting a new session."""
+    session_module = load_tool_module(MUX_TOOLS_ROOT / "session.py", "mux_session_marker_test")
+    marker_dir = tmp_path / "outputs" / "session" / "123"
+    marker_path = marker_dir / "mux-deactivated"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text("deactivated_at=2026-05-05T00:00:00+00:00\n")
+
+    try:
+        assert session_module.clear_mux_deactivation(marker_dir) is True
+        assert not marker_path.exists()
+        assert session_module.clear_mux_deactivation(marker_dir) is False
+    finally:
+        if marker_path.exists():
+            marker_path.unlink()
+
+
 def test_session_strict_runtime_writes_activation_artifacts(tmp_path: Path) -> None:
     """session.py should write explicit strict-runtime artifacts only when requested."""
     workspace = create_workspace(tmp_path)
@@ -577,6 +670,19 @@ def test_session_strict_runtime_writes_activation_artifacts(tmp_path: Path) -> N
     assert activation_payload["allowed_write_roots"] == [".specs"]
     assert session_dir_rel not in activation_payload["allowed_write_roots"]
     assert "outputs/session/mux-runtime" not in activation_payload["allowed_write_roots"]
+
+
+def test_deactivate_writes_mux_diagnostics_marker(tmp_path: Path) -> None:
+    """deactivate.py should write the marker consumed by the skill-scoped guard."""
+    workspace = create_workspace(tmp_path)
+    deactivate_result = run_python_script(MUX_TOOLS_ROOT / "deactivate.py", cwd=workspace)
+
+    assert deactivate_result.returncode == 0, deactivate_result.stdout + deactivate_result.stderr
+    assert parse_output_value(deactivate_result.stdout, "MUX_DIAGNOSTICS_ALLOWED") == "true"
+    marker_rel = parse_output_value(deactivate_result.stdout, "MUX_DEACTIVATED_MARKER")
+    marker_path = workspace / marker_rel
+    assert marker_path.exists()
+    assert marker_path.name == "mux-deactivated"
 
 
 def test_deactivate_removes_strict_runtime_artifacts(tmp_path: Path) -> None:

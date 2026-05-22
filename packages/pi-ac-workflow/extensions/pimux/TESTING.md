@@ -81,7 +81,8 @@ Observed validation:
 - sent payload: `exact-token:alpha-123`
 - child progress: `seen:exact-token:alpha-123`
 - child closeout: `done:exact-token:alpha-123`
-- settlement: `settled_completion`
+- terminal report observation: `terminal_report_received`
+- settlement after exit evidence: `settled_completion`
 
 ### 2. Full nested live smoke
 
@@ -113,13 +114,14 @@ When modifying files under `packages/pi-ac-workflow/extensions/pimux/` (or the p
 1. run the focused tests relevant to the changed surface
 2. run the full regression command
 3. if the change touches routing, settlement, shutdown, watchdogs, activity probes, or nested orchestration behavior, run at least one real live smoke scenario with headless agents
-4. record any important new runtime findings in a local `tmp/` artifact during investigation, then update this document if the persistent validation story changes
+4. if the change touches parent follow-up gating, validate quality-first no-nudge behavior: ordinary progress must not re-arm `send_message`, while `requiresResponse=true` allows one answer
+5. record any important new runtime findings in a local `tmp/` artifact during investigation, then update this document if the persistent validation story changes
 
 ## Wrapper clean-exit guidance
 
 The latest fresh full smoke confirmed the target routing and settlement behaviors, but some scenario wrapper agents were manually torn down after the leaf verdicts were captured. That means a wrapper agent for a scenario may still show `protocol_violation` even when the intended leaf-level assertion passed.
 
-Use this mapping going forward so wrappers exit cleanly whenever the wrapper itself is not the thing being killed for the test:
+Use this mapping going forward so wrappers exit cleanly whenever the wrapper itself is not the thing being killed for the test. If a wrapper emits a terminal report but stays live, status/activity must show `terminal_report_received`, then `terminal_report_exit_timeout` if exit evidence never arrives.
 
 - all direct children `settled_completion` -> wrapper emits `closeout`
 - any direct child `settled_waiting_on_parent` -> wrapper emits `question`

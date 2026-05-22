@@ -17,15 +17,18 @@ ENFORCEMENT LAYERS:
 4. WebSearch/WebFetch - DENY (delegate to researcher)
 5. TaskOutput - DENY (use signals)
 6. Skill - Allowlisted direct call (only mux-ospec), otherwise DENY
-7. Bash - Whitelist (mkdir -p, uv run tools/*)
+7. Bash - Whitelist (mkdir -p, uv run tools/*, pi-bash wrapper; cc-bash/direct pi/claude blocked)
 8. Task - Validate run_in_background=True
 
 Fail-closed: deny operations if hook encounters errors.
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
+from pathlib import Path
 from typing import TypedDict
 
 
@@ -62,6 +65,8 @@ class HookOutput(TypedDict):
     hookSpecificOutput: HookSpecificOutput
 
 
+MUX_DEACTIVATED_FILE_NAME = "mux-deactivated"
+
 # Read allowlist: paths orchestrator may read
 READ_ALLOWLIST_PATTERNS = [
     r"(?:^|/)\$\{CLAUDE_PLUGIN_ROOT\}/skills/mux(?:/|$)",  # Placeholder form
@@ -82,9 +87,16 @@ SEARCH_ALLOWLIST_PATTERNS = [
     r"(?:^|/)\.claude/hooks(?:/|$)",  # Hook discovery
 ]
 
+CC_BASH_DISABLED_PATTERN = r"^uv\s+run\s+.*\bcc-bash\.py\s+launch\b"
+CC_BASH_DISABLED_REASON = (
+    "cc-bash.py is disabled because Anthropic disabled subscription access to claude -p; "
+    "use pi-bash.py or native pimux workers."
+)
+
 # Bash command whitelist (regex patterns)
 BASH_WHITELIST_PATTERNS = [
     r"^mkdir\s+-p\s+",  # Create directories
+    r"^uv\s+run\s+\${CLAUDE_PLUGIN_ROOT}/skills/mux/tools/pi-bash\.py\s+launch\b",  # pi worker wrapper
     r"^uv\s+run\s+.*tools/",  # Any tools/ invocation
     r"^uv\s+run\s+\${CLAUDE_PLUGIN_ROOT}/skills/mux/tools/",  # MUX skill tools (explicit)
 ]
@@ -150,15 +162,71 @@ def is_bash_allowed(command: str) -> tuple[bool, str]:
     Returns (allowed, reason).
     """
     command = command.strip()
+    if re.match(CC_BASH_DISABLED_PATTERN, command):
+        return False, CC_BASH_DISABLED_REASON
     for pattern in BASH_WHITELIST_PATTERNS:
         if re.match(pattern, command):
             return True, f"Matches whitelist: {pattern}"
-    return False, "Command not in MUX whitelist. Allowed: mkdir -p, uv run tools/*"
+    return False, "Command not in MUX whitelist. Allowed: mkdir -p, uv run tools/*, pi-bash.py wrapper"
+
+
+def find_claude_pid() -> int | None:
+    """Trace up process tree to find claude process PID."""
+    try:
+        pid = os.getpid()
+        for _ in range(10):
+            result = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,comm=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            line = result.stdout.strip()
+            if not line:
+                break
+            parts = line.split()
+            if len(parts) >= 3:
+                _, ppid, comm = int(parts[0]), int(parts[1]), parts[2]
+                if "claude" in comm.lower():
+                    return pid
+                pid = ppid
+            else:
+                break
+    except Exception:
+        return None
+    return None
+
+
+def find_project_root() -> Path:
+    """Find project root by walking up to .git or CLAUDE.md."""
+    current = Path.cwd()
+    for _ in range(10):
+        if (current / ".git").exists() or (current / "CLAUDE.md").exists():
+            return current
+        if current.parent == current:
+            break
+        current = current.parent
+    return Path.cwd()
+
+
+def is_mux_deactivated(project_root: Path | None = None, claude_pid: int | None = None) -> bool:
+    """Return True when explicit MUX deactivation should disable this guard."""
+    try:
+        root = project_root or find_project_root()
+        pid = claude_pid or find_claude_pid() or os.getpid()
+        marker = root / "outputs" / "session" / str(pid) / MUX_DEACTIVATED_FILE_NAME
+        return marker.exists()
+    except Exception:
+        return False
 
 
 def main() -> None:
     """Main hook execution."""
     try:
+        if is_mux_deactivated():
+            print(json.dumps(make_decision("allow")))
+            return
+
         input_data: HookInput = json.load(sys.stdin)
         tool_name = input_data.get("tool_name", "")
         tool_input: ToolInput = input_data.get("tool_input", {})

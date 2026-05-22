@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
 	appendBridgeEvent,
+	appendBridgeEventIfMissing,
 	buildBridgeSessionEntry,
 	buildChildProtocol,
 	createBridgeLaunch,
@@ -44,6 +45,9 @@ import {
 	buildUnlockedControlPlaneLock,
 	evaluateControlPlaneToolCall,
 	evaluateNoPollingSupervisionToolCall,
+	isExplicitChildInspectionRequest,
+	isExplicitChildInstructionRequest,
+	isExplicitChildProbeRequest,
 	isExplicitLiveInspectionRequest,
 	normalizeControlPlaneLockState,
 	normalizeNoPollingSupervisionState,
@@ -114,10 +118,14 @@ import {
 	nowIso,
 	normalizeNotificationMode,
 	normalizeOptional,
+	normalizeThinkingEffort,
 	summarizePrompt,
+	type ThinkingEffort,
 } from "./paths.ts";
 import {
+	DEFAULT_TERMINAL_REPORT_EXIT_TIMEOUT_MS,
 	evaluateBridgeSettlement,
+	isSettledTerminalState,
 	isTerminalChildReportEvent,
 	shouldDeliverBridgeEventToParent,
 	shouldTriggerTurnForEvent,
@@ -139,6 +147,7 @@ interface SpawnRequest {
 	agentId?: string;
 	cwd?: string;
 	model?: string;
+	thinking?: ThinkingEffort;
 	prompt: string;
 	role?: string;
 	goal?: string;
@@ -174,7 +183,7 @@ interface ParsedArgs {
 function buildUsage(): string {
 	return [
 		"Usage:",
-		"  /pimux spawn [--open] [--cwd PATH] [--model PROVIDER/MODEL] [--agent-id ID] [--role ROLE] [--goal TEXT] [--parent ID] [--root ID] [--context TEXT] <prompt>",
+		"  /pimux spawn [--open] [--cwd PATH] [--model PROVIDER/MODEL] [--thinking LEVEL] [--agent-id ID] [--role ROLE] [--goal TEXT] [--parent ID] [--root ID] [--context TEXT] <prompt>",
 		"  /pimux open [target|last]",
 		"  /pimux list [--all] [--include-exited] [--root ID]",
 		"  /pimux tree [--all] [--include-exited] [--root ID]",
@@ -427,6 +436,7 @@ function buildSpawnRequest(parsed: ParsedArgs, ctx: ExtensionContext): SpawnRequ
 		agentId: getStringFlag(parsed, "agent-id"),
 		cwd: getStringFlag(parsed, "cwd") ?? ctx.cwd,
 		model: getStringFlag(parsed, "model") ?? formatCurrentModel(ctx) ?? DEFAULT_MODEL,
+		thinking: normalizeThinkingEffort(getStringFlag(parsed, "thinking")),
 		prompt,
 		role: getStringFlag(parsed, "role") ?? inferRoleFromPrompt(prompt),
 		goal: getStringFlag(parsed, "goal") ?? summarizePrompt(prompt),
@@ -652,10 +662,12 @@ async function pingManagedAgent(
 	const summary = `status request ${requestId}`;
 	const payload = [
 		`PIMUX_STATUS_REQUEST ${requestId}`,
-		"Reply promptly via pimux report_parent:",
+		"Neutral liveness probe: quality, accuracy, and validation outrank speed.",
+		"Respond via pimux report_parent when you reach a natural checkpoint:",
 		"- reportKind=progress if you are still working; include this request id in the summary.",
-		"- reportKind=closeout if the mission is complete.",
+		"- reportKind=closeout only if the mission is complete and validation/evidence are ready.",
 		"- reportKind=blocker or reportKind=failure if terminally blocked or failed.",
+		"Do not close out just because this status request arrived.",
 		message?.trim() ? `Parent note: ${message.trim()}` : undefined,
 	].filter((line): line is string => Boolean(line)).join("\n");
 	const event = await appendBridgeEvent(record.bridgeDir, {
@@ -711,20 +723,56 @@ async function ensureExitedBridgeEvent(params: {
 }): Promise<BridgeEvent[]> {
 	if (!params.bridgeDir || !params.launchId) return [];
 
-	let events = await readBridgeEvents(params.bridgeDir).catch(() => []);
-	const hasExitedEvent = events.some((event) => event.direction === "system" && event.type === "exited");
-	if (!hasExitedEvent) {
-		const exitedEvent = await appendBridgeEvent(params.bridgeDir, {
+	const result = await appendBridgeEventIfMissing(
+		params.bridgeDir,
+		{
 			launchId: params.launchId,
 			direction: "system",
 			type: "exited",
 			from: { agentId: params.agentId, sessionName: params.sessionName },
 			summary: params.exitSummary,
-		});
-		await writeBridgeEventSignal(params.bridgeDir, exitedEvent, true);
-		events = [...events, exitedEvent];
-	}
-	return events;
+		},
+		(event) => event.direction === "system" && event.type === "exited",
+	);
+	if (result.appended) await writeBridgeEventSignal(params.bridgeDir, result.event, true);
+	return result.events;
+}
+
+function terminalReportKind(event: BridgeEvent): Exclude<ReportParentKind, "progress"> | undefined {
+	if (!isTerminalChildReportEvent(event)) return undefined;
+	return event.type;
+}
+
+async function recordTerminalReportReceived(bridgeDir: string, event: BridgeEvent): Promise<void> {
+	const kind = terminalReportKind(event);
+	if (!kind) return;
+	await writeBridgeParentState(bridgeDir, {
+		deliveredEventIds: [],
+		terminalState: "terminal_report_received",
+		terminalReportEventId: event.eventId,
+		terminalReportKind: kind,
+		terminalReportObservedAt: event.timestamp,
+	});
+}
+
+async function recordTerminalReportExitTimeout(bridgeDir: string, event: BridgeEvent): Promise<void> {
+	const kind = terminalReportKind(event);
+	if (!kind) return;
+	await writeBridgeParentState(bridgeDir, {
+		deliveredEventIds: [],
+		terminalState: "terminal_report_exit_timeout",
+		terminalReportEventId: event.eventId,
+		terminalReportKind: kind,
+		terminalReportObservedAt: event.timestamp,
+		terminalReportExitTimedOutAt: nowIso(),
+	});
+}
+
+function scheduleCurrentChildExitAfterTerminalReport(): void {
+	const timer = setTimeout(() => {
+		process.exit(0);
+	}, TERMINAL_REPORT_SELF_EXIT_DELAY_MS);
+	timer.unref?.();
 }
 
 async function finalizeBridgeAfterForcedTermination(record: ManagedAgentRecord, exitSummary?: string): Promise<void> {
@@ -736,7 +784,7 @@ async function finalizeBridgeAfterForcedTermination(record: ManagedAgentRecord, 
 		exitSummary: exitSummary ?? `${record.agentId} terminated by parent`,
 	});
 	const settlement = evaluateBridgeSettlement(events);
-	if (settlement.settledState === "running" || !record.bridgeDir) return;
+	if (!isSettledTerminalState(settlement.settledState) || !record.bridgeDir) return;
 
 	const parentState = await readBridgeParentState(record.bridgeDir).catch(() => ({ deliveredEventIds: [] }));
 	parentState.terminalState = settlement.settledState;
@@ -816,12 +864,21 @@ async function finalizeManagedAgentAfterTerminalReport(
 	launch: Pick<BridgeLaunchFile, "agentId" | "sessionName" | "bridgeDir" | "launchId">,
 	ctx: ExtensionContext,
 ): Promise<BridgeEvent[]> {
+	const existingEvents = await readBridgeEvents(launch.bridgeDir).catch(() => []);
+	if (!existingEvents.some((event) => event.direction === "system" && event.type === "exited")) {
+		if (await tmuxHasSession(launch.sessionName).catch(() => false)) {
+			await killTmuxSession(launch.sessionName);
+		}
+		if (await tmuxHasSession(launch.sessionName).catch(() => false)) {
+			const terminalEvent = [...existingEvents].reverse().find(isTerminalChildReportEvent);
+			if (terminalEvent) await recordTerminalReportExitTimeout(launch.bridgeDir, terminalEvent);
+			return existingEvents;
+		}
+	}
+
 	const stateRoot = getStateRoot(ctx.cwd);
 	const registry = await readRegistry(stateRoot);
 	const record = registry.agents.find((agent) => agent.agentId === launch.agentId || agent.sessionName === launch.sessionName);
-	if (await tmuxHasSession(launch.sessionName).catch(() => false)) {
-		await killTmuxSession(launch.sessionName);
-	}
 	if (record) {
 		const exitedAt = nowIso();
 		record.status = "exited";
@@ -946,6 +1003,10 @@ async function reportParent(
 		reportPath,
 	});
 	event.signalPath = await writeBridgeEventSignal(currentEnv.bridgeDir, event, request.kind !== "failure");
+	if (isTerminalChildReportEvent(event)) {
+		await recordTerminalReportReceived(currentEnv.bridgeDir, event);
+		scheduleCurrentChildExitAfterTerminalReport();
+	}
 	return { bridgeDir: currentEnv.bridgeDir, event };
 }
 
@@ -1157,6 +1218,8 @@ const CONTROL_PLANE_ACTIVE_TOOLS = ["pimux", "AskUserQuestion", "say"];
 const NO_POLLING_SPAWN_ECHO = "NO-POLL: do not poll pimux or use Bash sleep/wait loops; wait for delivered child activity.";
 const PARENT_DELIVERY_DEBOUNCE_MS = 75;
 const BACKGROUND_MONITOR_INTERVAL_MS = 30_000;
+const TERMINAL_REPORT_EXIT_TIMEOUT_MS = DEFAULT_TERMINAL_REPORT_EXIT_TIMEOUT_MS;
+const TERMINAL_REPORT_SELF_EXIT_DELAY_MS = 750;
 
 function logBackgroundError(error: unknown): void {
 	console.error(error instanceof Error ? error.stack ?? error.message : String(error));
@@ -1257,6 +1320,9 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 	let controlPlaneLock: ControlPlaneLockState | undefined;
 	let noPollingSupervision: NoPollingSupervisionState | undefined;
 	let explicitLiveInspectionRequested = false;
+	let explicitChildInspectionRequested = false;
+	let explicitChildInstructionRequested = false;
+	let explicitChildProbeRequested = false;
 
 	const persistNoPollingSupervision = (nextState: NoPollingSupervisionState): void => {
 		noPollingSupervision = nextState;
@@ -1403,6 +1469,54 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 		ctx.ui.setWidget(EXTENSION_NAME, dashboardLines(statuses));
 	};
 
+	const enqueueTerminalReportExitTimeout = async (
+		bridgeDir: string,
+		launch: BridgeLaunchFile,
+		event: BridgeEvent,
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		const parentState = await readBridgeParentState(bridgeDir).catch(() => ({ deliveredEventIds: [] }));
+		if (parentState.terminalReportExitTimeoutNotifiedAt) return;
+		const timedOutAt = parentState.terminalReportExitTimedOutAt ?? nowIso();
+		await writeBridgeParentState(bridgeDir, {
+			deliveredEventIds: [],
+			terminalState: "terminal_report_exit_timeout",
+			terminalReportEventId: event.eventId,
+			terminalReportKind: terminalReportKind(event),
+			terminalReportObservedAt: event.timestamp,
+			terminalReportExitTimedOutAt: timedOutAt,
+			terminalReportExitTimeoutNotifiedAt: timedOutAt,
+		});
+		const content = [
+			"# pimux terminal report exit timeout",
+			"",
+			`${launch.agentId} emitted terminal report ${event.type} but the managed tmux session did not produce exit evidence before timeout.`,
+			"",
+			"Deterministic state:",
+			`- agentId: ${launch.agentId}`,
+			`- sessionName: ${launch.sessionName}`,
+			`- bridgeSettlementState: terminal_report_exit_timeout`,
+			`- terminalEventId: ${event.eventId}`,
+			`- terminalReportKind: ${event.type}`,
+			`- terminalReportObservedAt: ${event.timestamp}`,
+			`- terminalReportExitTimedOutAt: ${timedOutAt}`,
+			"",
+			"Recommended recovery: inspect with pimux status/activity/capture, then use pimux kill if the child is still live.",
+		].join("\n");
+		enqueueParentDelivery(
+			{
+				key: `terminal-timeout:${bridgeDir}:${event.eventId}`,
+				bridgeDir,
+				launch,
+				content,
+				triggerTurn: true,
+				eventIds: [],
+				createdAt: timedOutAt,
+			},
+			ctx,
+		);
+	};
+
 	const processBridgeDeliveriesOnce = async (bridgeDir: string, sessionKey: string, ctx: ExtensionContext) => {
 		const launch = await readBridgeLaunch(bridgeDir);
 		if (launch.parentSessionKey !== sessionKey) return;
@@ -1420,17 +1534,20 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			if (!terminalReport && delivered.has(event.eventId)) continue;
 			if (terminalReport) {
 				terminalReportForAutoExit = event;
+				await recordTerminalReportReceived(bridgeDir, event);
 			}
 			if (event.direction === "child_to_parent" && !terminalReport) {
 				nextLock = updateControlPlaneLockForChildActivity(nextLock, {
 					agentId: launch.agentId,
 					eventId: event.eventId,
 					timestamp: event.timestamp,
+					requiresResponse: event.requiresResponse,
 				});
 				nextSupervision = updateNoPollingSupervisionForChildActivity(nextSupervision, {
 					agentId: launch.agentId,
 					eventId: event.eventId,
 					timestamp: event.timestamp,
+					requiresResponse: event.requiresResponse,
 				});
 			}
 			if (shouldDeliverBridgeEventToParent(event)) {
@@ -1456,8 +1573,16 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			events = await finalizeManagedAgentAfterTerminalReport(launch, ctx);
 			parentState = await readBridgeParentState(bridgeDir);
 		}
-		const settlement = evaluateBridgeSettlement(events);
-		if (settlement.settledState !== "running") {
+		const settlement = evaluateBridgeSettlement(events, {
+			nowMs: Date.now(),
+			terminalExitTimeoutMs: TERMINAL_REPORT_EXIT_TIMEOUT_MS,
+		});
+		if (settlement.settledState === "terminal_report_exit_timeout" && settlement.terminalEvent) {
+			await recordTerminalReportExitTimeout(bridgeDir, settlement.terminalEvent);
+			await enqueueTerminalReportExitTimeout(bridgeDir, launch, settlement.terminalEvent, ctx);
+			parentState = await readBridgeParentState(bridgeDir);
+		}
+		if (isSettledTerminalState(settlement.settledState)) {
 			const finalizedAt = parentState.terminalFinalizedAt ?? nowIso();
 			const alreadyObserved =
 				Boolean(parentState.terminalObservedAt) &&
@@ -1604,7 +1729,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 				"Deterministic state:",
 				...formatAgentActivitySnapshot(activity).map((line) => `- ${line}`),
 				"",
-				"Recommended recovery: use pimux activity for a deterministic check, or pimux ping_agent to request a child response.",
+				"Recommended recovery: use pimux activity/status for a passive deterministic check first. Use pimux ping_agent only as a neutral liveness probe; do not ask the child to hurry or close out.",
 			].join("\n");
 			enqueueParentDelivery(
 				{
@@ -1622,6 +1747,25 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 		}
 	};
 
+	const processTerminalReportExitWatchdog = async (ctx: ExtensionContext): Promise<void> => {
+		const sessionKey = getSessionKey(ctx);
+		const statuses = await listManagedAgents(ctx, { scope: "session", includeExited: true }).catch(() => []);
+		for (const status of statuses) {
+			if (status.record.parentSessionKey !== sessionKey) continue;
+			if (status.bridgeSettlementState !== "terminal_report_exit_timeout") continue;
+			if (!status.record.bridgeDir) continue;
+			const events = await readBridgeEvents(status.record.bridgeDir).catch(() => []);
+			const settlement = evaluateBridgeSettlement(events, {
+				nowMs: Date.now(),
+				terminalExitTimeoutMs: TERMINAL_REPORT_EXIT_TIMEOUT_MS,
+			});
+			if (settlement.settledState !== "terminal_report_exit_timeout" || !settlement.terminalEvent) continue;
+			const launch = await readBridgeLaunch(status.record.bridgeDir);
+			await recordTerminalReportExitTimeout(status.record.bridgeDir, settlement.terminalEvent);
+			await enqueueTerminalReportExitTimeout(status.record.bridgeDir, launch, settlement.terminalEvent, ctx);
+		}
+	};
+
 	const stopBackgroundMonitor = (): void => {
 		if (!backgroundMonitorTimer) return;
 		clearInterval(backgroundMonitorTimer);
@@ -1633,6 +1777,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 		backgroundMonitorTimer = setInterval(() => {
 			runBackgroundTask(reconcileParentBridgeWatchers(ctx));
 			runBackgroundTask(processInactivityWatchdog(ctx));
+			runBackgroundTask(processTerminalReportExitWatchdog(ctx));
 		}, BACKGROUND_MONITOR_INTERVAL_MS);
 		backgroundMonitorTimer.unref?.();
 	};
@@ -1726,6 +1871,8 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 		const openIterm = request.openIterm ?? inferOpenItermFromPrompt(prompt);
 		const notificationMode = DEFAULT_NOTIFICATION_MODE;
 		const contextBrief = normalizeOptional(request.contextBrief);
+		const model = normalizeOptional(request.model) ?? formatCurrentModel(ctx) ?? DEFAULT_MODEL;
+		const thinking = normalizeThinkingEffort(request.thinking);
 		const parentAgentId = normalizeOptional(request.parentAgentId) ?? currentEnv.agentId;
 		let rootAgentId = normalizeOptional(request.rootAgentId);
 		let rootOwnerSessionKey = currentEnv.rootOwnerSessionKey ?? currentSessionKey;
@@ -1752,7 +1899,8 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			agentId,
 			sessionName,
 			cwd,
-			model: normalizeOptional(request.model) ?? formatCurrentModel(ctx) ?? DEFAULT_MODEL,
+			model,
+			thinking,
 			prompt,
 			role,
 			goal,
@@ -1778,6 +1926,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			promptPath,
 			cwd,
 			model: launch.model,
+			thinking: launch.thinking,
 			agentId,
 			parentAgentId,
 			rootAgentId,
@@ -1800,6 +1949,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			sessionName,
 			cwd,
 			model: launch.model,
+			thinking: launch.thinking,
 			promptPreview: summarizePrompt(prompt),
 			role,
 			goal,
@@ -2059,6 +2209,9 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		explicitLiveInspectionRequested = isExplicitLiveInspectionRequest(event.text);
+		explicitChildInspectionRequested = isExplicitChildInspectionRequest(event.text);
+		explicitChildInstructionRequested = isExplicitChildInstructionRequest(event.text);
+		explicitChildProbeRequested = isExplicitChildProbeRequest(event.text);
 		if (getCurrentEnv().agentId) {
 			return { action: "continue" as const };
 		}
@@ -2088,7 +2241,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const currentLock = getParentControlPlaneLock(ctx, controlPlaneLock);
-		const toolContext = { explicitLiveInspectionRequested };
+		const toolContext = { explicitLiveInspectionRequested, explicitChildInspectionRequested, explicitChildInstructionRequested, explicitChildProbeRequested };
 		const decision = evaluateControlPlaneToolCall(currentLock, {
 			toolName: event.toolName,
 			input: event.input as Record<string, unknown> | undefined,
@@ -2279,9 +2432,9 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 			"FIRST: do not poll pimux and do not use Bash sleep/wait loops; wait for delivered child activity.",
 			"Use this tool when the user wants long-lived tmux-backed Pi agents managed from the current session.",
 			"Default to headless agents unless the user explicitly wants to watch live.",
-			"Use send_message for parent-to-child messaging and report_parent for child-to-parent reporting.",
-			"Use activity for deterministic no-capture state checks; use ping_agent to request a correlated child liveness response.",
-			"Treat status/activity/capture/tree/list/open as recovery-only after spawn; open is allowed when the user explicitly asks to watch live.",
+			"Use send_message only to answer child requests or user-directed child instructions; use report_parent for child-to-parent reporting.",
+			"Use activity for deterministic no-capture state checks; use ping_agent only as a neutral correlated liveness probe.",
+			"Treat status/activity/capture/tree/list/open as recovery-only after spawn; open is allowed when the user explicitly asks to watch live; do not nudge children toward closeout.",
 			"Use report_parent only from the authoritative direct pimux child session. Local helpers are local-only and must not call pimux or report_parent.",
 			"Success settles only after closeout plus child exit. Progress is non-terminal; question is terminal waiting-on-parent settlement.",
 			"For same-session child questions that must continue, use report_parent(progress, requiresResponse=true), not question.",
@@ -2299,6 +2452,7 @@ export default function pimuxExtension(pi: ExtensionAPI) {
 								agentId: params.agentId,
 								cwd: params.cwd ?? ctx.cwd,
 								model: params.model,
+								thinking: params.thinking,
 								prompt: params.prompt,
 								role: params.role,
 								goal: params.goal,
