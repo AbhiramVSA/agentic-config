@@ -6,6 +6,7 @@ All notable changes to agentic-config.
 
 ### Added
 
+- Project config: add `.pi/pimux.yaml` defaults for pimux agent dispatch.
 - `pi-ac-safety`: add destructive-bash coverage for IaC/resource changes, privilege escalation, team-visible GitHub/Git operations, and generic `gh api` write prompts.
 - `pi-ac-workflow`: add explicit `--thinking` effort support to `pimux spawn` and forward it to spawned Pi children.
 - `ac-workflow`: allow explicit MUX deactivation to stand down skill-scoped Bash guards for diagnostics until the next session starts.
@@ -17,6 +18,7 @@ All notable changes to agentic-config.
 
 ### Changed
 
+- Agent guidelines: require reading `.pi/pimux.yaml` before spawning pimux agents.
 - `pi-ac-workflow`: harden `pi-bash.py` and `cc-bash.py` stream launches with lean event logs, explicit raw-event opt-in, pre-output wrapper diagnostics, first-event startup watchdogs, and process-group cleanup for inherited-pipe stalls.
 - Canonical generator: reconcile generated package drift by promoting current `pi-ac-safety` allow-persistence behavior into canonical assets and syncing generated `pi-compat` dependency versions.
 - `pi-ac-workflow`: harden `pimux` parent bridge delivery for bursty terminal closeouts with batched notifications, retryable terminal notification state, bridge-delivery reconciliation, and inactivity watchdog alerts.

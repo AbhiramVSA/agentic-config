@@ -1,0 +1,12 @@
+# Project defaults for pimux agent dispatch.
+# Read this file before spawning pimux agents unless the user explicitly overrides.
+default:
+  provider: openai-codex
+  model: openai-codex/gpt-5.5
+  thinking: xhigh
+
+tasks:
+  default:
+    provider: openai-codex
+    model: openai-codex/gpt-5.5
+    thinking: xhigh

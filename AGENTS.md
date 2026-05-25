@@ -8,6 +8,8 @@
 - After edits: uv run ruff check --fix <file> && uv run pyright <file>
 
 ## Core Rules
+- Before dispatching pimux agents, read `.pi/pimux.yaml` and use its provider/model/thinking defaults unless the user explicitly overrides.
+- Current pimux default: provider `openai-codex`, model `openai-codex/gpt-5.5`, thinking `xhigh`.
 - Verify over assume; failures first; always re-raise (never swallow exceptions)
 - Type hints for all public functions, descriptive names, small pure functions
 - Minimal changes; avoid ambiguity; no placeholders
