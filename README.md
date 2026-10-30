@@ -1,3 +1,5 @@
+> **Fork of [WaterplanAI/agentic-config](https://github.com/WaterplanAI/agentic-config).**
+
 # agentic-config
 
 Project-agnostic, composable AI workflow automation via pi packages and Claude Code plugins.
