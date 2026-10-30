@@ -1,4 +1,8 @@
-# agentic-config
+<p align="center">
+  <img src="assets/readme-mark.png" alt="Repository mark for the agentic-config fork" width="200">
+</p>
+
+<h1 align="center">agentic-config</h1>
 
 > **Fork status:** Fork of [WaterplanAI/agentic-config](https://github.com/WaterplanAI/agentic-config). The existing project guide follows.
 
