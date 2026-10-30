@@ -1,6 +1,18 @@
-> **Fork of [WaterplanAI/agentic-config](https://github.com/WaterplanAI/agentic-config).**
-
 # agentic-config
+
+> **Fork status:** Fork of [WaterplanAI/agentic-config](https://github.com/WaterplanAI/agentic-config). The existing project guide follows.
+
+## Overview
+
+Agentic-config distributes reusable workflow tools as pi packages and Claude Code plugins.
+
+## Navigation
+
+[Quick Start](#quick-start) · [Pi Packages](#pi-packages) · [Plugins](#plugins) · [Documentation](#documentation) · [License](#license)
+
+## Existing upstream guide
+
+The guide, project branding, and legal notices from the fork base remain below.
 
 Project-agnostic, composable AI workflow automation via pi packages and Claude Code plugins.
 
